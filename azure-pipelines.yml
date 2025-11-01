@@ -1,0 +1,154 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  karateBaseUrl: 'https://nongenerical-dereistically-rachael.ngrok-free.dev'
+  jmeterVersion: '5.6.3'
+
+# =======================
+# 1️⃣ Compilar y probar el proyecto Java
+# =======================
+stages:
+- stage: BuildAndTestJava
+  displayName: 'Build and Test Java Project'
+  jobs:
+  - job: Java
+    displayName: 'Run Maven Tests'
+    steps:
+    - task: JavaToolInstaller@0
+      inputs:
+        versionSpec: '17'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+      displayName: 'Set up Java 17'
+
+    - task: Maven@3
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean test'
+        options: '-B'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+      displayName: 'Run Maven Tests with Coverage'
+
+    - bash: |
+        mvn jacoco:report
+      displayName: 'Generate JaCoCo Coverage Report'
+
+# =======================
+# 2️⃣ Configurar dependencias (Java, JMeter, Karate)
+# =======================
+- stage: Setup
+  displayName: 'Setup Tools and Dependencies'
+  dependsOn: BuildAndTestJava
+  jobs:
+  - job: DownloadDependencies
+    displayName: 'Download JMeter and Karate'
+    steps:
+    - task: JavaToolInstaller@0
+      inputs:
+        versionSpec: '17'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+      displayName: 'Install Java 17'
+
+    - script: |
+        wget https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$(jmeterVersion).tgz
+        tar -xzf apache-jmeter-$(jmeterVersion).tgz
+        mv apache-jmeter-$(jmeterVersion) jmeter
+      displayName: 'Download and Extract JMeter'
+
+    - script: |
+        curl -L https://github.com/karatelabs/karate/releases/download/v1.5.1/karate-1.5.1.jar -o karate.jar
+      displayName: 'Download Karate JAR'
+
+    - publish: $(System.DefaultWorkingDirectory)/jmeter
+      artifact: JMeter
+      displayName: 'Publish JMeter Artifact'
+
+    - publish: $(System.DefaultWorkingDirectory)/karate.jar
+      artifact: Karate
+      displayName: 'Publish Karate Artifact'
+
+# =======================
+# 3️⃣ Ejecutar pruebas Karate
+# =======================
+- stage: RunKarateTests
+  displayName: 'Run Karate Tests'
+  dependsOn: Setup
+  jobs:
+  - job: Karate
+    steps:
+    - download: current
+      artifact: Karate
+      displayName: 'Download Karate Artifact'
+
+    - script: |
+        mkdir -p $(Pipeline.Workspace)/KarateReports
+        java -jar $(Pipeline.Workspace)/Karate/karate.jar -o $(Pipeline.Workspace)/KarateReports Employees.feature
+      displayName: 'Execute Karate Tests'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/karate-tests'
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Pipeline.Workspace)/KarateReports'
+        artifact: 'KarateReports'
+      displayName: 'Publish Karate Reports'
+      condition: always()
+
+# =======================
+# 4️⃣ Ejecutar pruebas JMeter
+# =======================
+- stage: RunJMeterTests
+  displayName: 'Run JMeter Tests'
+  dependsOn: Setup
+  jobs:
+  - job: JMeter
+    steps:
+    - download: current
+      artifact: JMeter
+      displayName: 'Download JMeter Artifact'
+
+    # Traer el repo con los tests y CSV
+    - checkout: self
+
+    - script: |
+        chmod +x $(Pipeline.Workspace)/JMeter/bin/jmeter
+        $(Pipeline.Workspace)/JMeter/bin/jmeter -n \
+          -t $(System.DefaultWorkingDirectory)/jmeter-tests/employees_tests.jmx \
+          -l $(Pipeline.Workspace)/JMeter/results.jtl \
+          -e -o $(Pipeline.Workspace)/JMeter/reports
+      displayName: 'Execute JMeter Tests'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/jmeter-tests'
+
+    - publish: $(Pipeline.Workspace)/JMeter/reports
+      artifact: JMeterReports
+      displayName: 'Publish JMeter Reports'
+      condition: always()
+
+
+# =======================
+# 5️⃣ Analizar resultados
+# =======================
+- stage: AnalyzeResults
+  displayName: 'Analyze Karate and JMeter Reports'
+  dependsOn:
+  - RunKarateTests
+  - RunJMeterTests
+  jobs:
+  - job: Analyze
+    steps:
+    - download: current
+      artifact: KarateReports
+      displayName: 'Download Karate Reports'
+
+    - download: current
+      artifact: JMeterReports
+      displayName: 'Download JMeter Reports'
+
+    - script: |
+        echo "Analizar reportes manualmente o integrar con SonarQube/Allure"
+      displayName: 'Placeholder for Analysis'
